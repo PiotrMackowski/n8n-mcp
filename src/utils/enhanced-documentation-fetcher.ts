@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs';
+import os from 'os';
 import path from 'path';
 import { logger } from './logger';
 import { spawnSync } from 'child_process';
@@ -83,13 +84,23 @@ export class EnhancedDocumentationFetcher {
       // SECURITY: Verify path is absolute and within allowed boundaries
       const absolutePath = path.resolve(sanitized);
 
-      // Block paths that could escape to sensitive directories
-      if (absolutePath.startsWith('/etc') ||
-          absolutePath.startsWith('/sys') ||
-          absolutePath.startsWith('/proc') ||
-          absolutePath.startsWith('/var/log')) {
-        logger.error('docsPath points to system directory - blocked', { docsPath, absolutePath });
-        throw new Error('Invalid docsPath: cannot use system directories');
+      // Block paths outside the user's home directory or standard project/temp directories.
+      // Uses an allowlist approach: only paths under known safe roots are permitted.
+      const allowedRoots = [
+        path.resolve(__dirname, '../../'),           // Project root
+        path.resolve(process.cwd()),                 // Current working directory
+        path.join(os.homedir(), '.n8n'),             // n8n config directory
+        os.tmpdir(),                                  // OS temp directory
+      ];
+
+      const isAllowed = allowedRoots.some(root => absolutePath.startsWith(root + path.sep) || absolutePath === root);
+      if (!isAllowed) {
+        logger.error('docsPath is outside allowed directories - blocked', {
+          docsPath,
+          absolutePath,
+          allowedRoots
+        });
+        throw new Error('Invalid docsPath: path must be within the project, working directory, n8n config, or temp directory');
       }
 
       this.docsPath = absolutePath;

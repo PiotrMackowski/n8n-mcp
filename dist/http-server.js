@@ -126,7 +126,7 @@ async function startFixedHTTPServer() {
     logger_1.logger.info('Created persistent MCP server instance');
     app.get('/', (req, res) => {
         const port = parseInt(process.env.PORT || '3000');
-        const host = process.env.HOST || '0.0.0.0';
+        const host = process.env.HOST || '127.0.0.1';
         const baseUrl = (0, url_detector_1.detectBaseUrl)(req, host, port);
         const endpoints = (0, url_detector_1.formatEndpointUrls)(baseUrl);
         res.json({
@@ -268,11 +268,28 @@ async function startFixedHTTPServer() {
         }
         try {
             let body = '';
+            const MAX_BODY_SIZE = 10 * 1024 * 1024;
+            let bodyTooLarge = false;
             req.on('data', chunk => {
                 body += chunk.toString();
+                if (body.length > MAX_BODY_SIZE) {
+                    bodyTooLarge = true;
+                    req.destroy();
+                }
             });
             req.on('end', async () => {
                 try {
+                    if (bodyTooLarge) {
+                        res.status(413).json({
+                            jsonrpc: '2.0',
+                            error: {
+                                code: -32600,
+                                message: 'Request body too large'
+                            },
+                            id: null
+                        });
+                        return;
+                    }
                     const jsonRpcRequest = JSON.parse(body);
                     logger_1.logger.debug('Received JSON-RPC request:', { method: jsonRpcRequest.method });
                     let response;

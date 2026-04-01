@@ -33,6 +33,7 @@ export declare class SingleSessionHTTPServer {
     private resetSessionSSE;
     private isExpired;
     private isSessionExpired;
+    private measureJsonDepth;
     start(): Promise<void>;
     shutdown(): Promise<void>;
     getSessionInfo(): {

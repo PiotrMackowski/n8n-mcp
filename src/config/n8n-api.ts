@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
 import { logger } from '../utils/logger';
+import { SSRFProtection } from '../utils/ssrf-protection';
 
 // n8n API configuration schema
 const n8nApiConfigSchema = z.object({
@@ -68,6 +69,20 @@ export function getN8nApiConfigFromContext(context: {
     timeout: context.n8nApiTimeout ?? 30000,
     maxRetries: context.n8nApiMaxRetries ?? 3,
   };
+}
+
+/**
+ * Validate that an n8n API base URL is safe from SSRF attacks.
+ * Should be called before using a URL from an untrusted source (e.g., HTTP headers).
+ *
+ * @param url - The URL to validate
+ * @returns Promise with validation result
+ */
+export async function validateN8nApiUrl(url: string): Promise<{
+  valid: boolean;
+  reason?: string;
+}> {
+  return SSRFProtection.validateWebhookUrl(url);
 }
 
 // Type export

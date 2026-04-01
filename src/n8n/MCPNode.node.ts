@@ -154,7 +154,17 @@ export class MCPNode implements INodeType {
           case 'callTool':
             const toolName = this.getNodeParameter('toolName', itemIndex) as string;
             const toolArgumentsJson = this.getNodeParameter('toolArguments', itemIndex) as string;
-            const toolArguments = JSON.parse(toolArgumentsJson);
+            let toolArguments: Record<string, unknown>;
+            try {
+              const parsed = JSON.parse(toolArgumentsJson);
+              if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                throw new NodeOperationError(this.getNode(), 'Tool arguments must be a JSON object', { itemIndex });
+              }
+              toolArguments = parsed;
+            } catch (e) {
+              if (e instanceof NodeOperationError) throw e;
+              throw new NodeOperationError(this.getNode(), `Invalid JSON in toolArguments: ${(e as Error).message}`, { itemIndex });
+            }
             
             result = await (this as any).callMCPTool(credentials, toolName, toolArguments);
             break;
@@ -175,7 +185,17 @@ export class MCPNode implements INodeType {
           case 'getPrompt':
             const promptName = this.getNodeParameter('promptName', itemIndex) as string;
             const promptArgumentsJson = this.getNodeParameter('promptArguments', itemIndex) as string;
-            const promptArguments = JSON.parse(promptArgumentsJson);
+            let promptArguments: Record<string, unknown>;
+            try {
+              const parsed = JSON.parse(promptArgumentsJson);
+              if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                throw new NodeOperationError(this.getNode(), 'Prompt arguments must be a JSON object', { itemIndex });
+              }
+              promptArguments = parsed;
+            } catch (e) {
+              if (e instanceof NodeOperationError) throw e;
+              throw new NodeOperationError(this.getNode(), `Invalid JSON in promptArguments: ${(e as Error).message}`, { itemIndex });
+            }
             
             result = await (this as any).getMCPPrompt(credentials, promptName, promptArguments);
             break;

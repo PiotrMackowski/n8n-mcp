@@ -1,5 +1,4 @@
 import { InstanceContext } from '../types/instance-context';
-import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 export declare class N8NDocumentationMCPServer {
     private server;
     private db;
@@ -11,12 +10,11 @@ export declare class N8NDocumentationMCPServer {
     private instanceContext?;
     private previousTool;
     private previousToolTimestamp;
-    private earlyLogger;
     private disabledToolsCache;
     private useSharedDatabase;
     private sharedDbState;
     private isShutdown;
-    constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger);
+    constructor(instanceContext?: InstanceContext);
     close(): Promise<void>;
     private initializeDatabase;
     private initializeInMemorySchema;
@@ -35,6 +33,7 @@ export declare class N8NDocumentationMCPServer {
     private getNodeInfo;
     private searchNodes;
     private searchNodesFTS;
+    private sanitizeFtsToken;
     private searchNodesFuzzy;
     private calculateFuzzyScore;
     private getEditDistance;

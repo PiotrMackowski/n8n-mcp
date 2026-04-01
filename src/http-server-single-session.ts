@@ -25,6 +25,7 @@ import {
   STANDARD_PROTOCOL_VERSION
 } from './utils/protocol-version';
 import { InstanceContext, validateInstanceContext } from './types/instance-context';
+import { validateN8nApiUrl } from './config/n8n-api';
 import { SessionState } from './types/session-state';
 import { closeSharedDatabase } from './database/shared-database';
 
@@ -823,6 +824,24 @@ export class SingleSessionHTTPServer {
   }
 
   /**
+   * Measure the nesting depth of a parsed JSON value.
+   * Returns early once the cutoff is reached to avoid traversing huge payloads.
+   */
+  private measureJsonDepth(value: unknown, current: number, cutoff: number): number {
+    if (current >= cutoff) return current;
+    if (value === null || typeof value !== 'object') return current;
+
+    let maxChild = current;
+    const entries = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+    for (const child of entries) {
+      const childDepth = this.measureJsonDepth(child, current + 1, cutoff);
+      if (childDepth >= cutoff) return childDepth;
+      if (childDepth > maxChild) maxChild = childDepth;
+    }
+    return maxChild;
+  }
+
+  /**
    * Start the HTTP server
    */
   async start(): Promise<void> {
@@ -830,6 +849,31 @@ export class SingleSessionHTTPServer {
     
     // Create JSON parser middleware for endpoints that need it
     const jsonParser = express.json({ limit: '10mb' });
+
+    // SECURITY: Middleware to reject excessively nested JSON payloads.
+    // Deeply nested objects can cause stack overflows during processing.
+    const MAX_JSON_DEPTH = 20;
+    const jsonDepthGuard = (req: express.Request, res: express.Response, next: express.NextFunction): void => {
+      if (req.body) {
+        const depth = this.measureJsonDepth(req.body, 0, MAX_JSON_DEPTH + 1);
+        if (depth > MAX_JSON_DEPTH) {
+          logger.warn('Request rejected: JSON nesting depth exceeded limit', {
+            maxDepth: MAX_JSON_DEPTH,
+            ip: req.ip
+          });
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32600,
+              message: `Request body nesting depth exceeds limit of ${MAX_JSON_DEPTH}`
+            },
+            id: (req.body as any)?.id || null
+          });
+          return;
+        }
+      }
+      next();
+    };
     
     // Configure trust proxy for correct IP logging behind reverse proxies
     const trustProxy = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
@@ -852,15 +896,19 @@ export class SingleSessionHTTPServer {
     
     // CORS configuration
     app.use((req, res, next) => {
-      const allowedOrigin = process.env.CORS_ORIGIN || '*';
-      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
-      res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
-      res.setHeader('Access-Control-Max-Age', '86400');
+      const corsOrigin = process.env.CORS_ORIGIN;
+      if (corsOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+        res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
+        res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+        res.setHeader('Access-Control-Max-Age', '86400');
+      }
+      // If CORS_ORIGIN is not set, no CORS headers are sent, which means
+      // browsers will block cross-origin requests by default.
       
       if (req.method === 'OPTIONS') {
-        res.sendStatus(204);
+        res.sendStatus(corsOrigin ? 204 : 403);
         return;
       }
       next();
@@ -879,7 +927,7 @@ export class SingleSessionHTTPServer {
     // Root endpoint with API information
     app.get('/', (req, res) => {
       const port = parseInt(process.env.PORT || '3000');
-      const host = process.env.HOST || '0.0.0.0';
+    const host = process.env.HOST || '127.0.0.1';
       const baseUrl = detectBaseUrl(req, host, port);
       const endpoints = formatEndpointUrls(baseUrl);
       
@@ -948,7 +996,7 @@ export class SingleSessionHTTPServer {
     });
     
     // Test endpoint for manual testing without auth
-    app.post('/mcp/test', jsonParser, async (req: express.Request, res: express.Response): Promise<void> => {
+    app.post('/mcp/test', jsonParser, jsonDepthGuard, async (req: express.Request, res: express.Response): Promise<void> => {
       logger.info('TEST ENDPOINT: Manual test request received', {
         method: req.method,
         headers: req.headers,
@@ -1174,7 +1222,7 @@ export class SingleSessionHTTPServer {
     });
 
     // Main MCP endpoint with authentication and rate limiting
-    app.post('/mcp', authLimiter, jsonParser, async (req: express.Request, res: express.Response): Promise<void> => {
+    app.post('/mcp', authLimiter, jsonParser, jsonDepthGuard, async (req: express.Request, res: express.Response): Promise<void> => {
       // Log comprehensive debug info about the request
       logger.info('POST /mcp request received - DETAILED DEBUG', {
         headers: req.headers,
@@ -1296,7 +1344,7 @@ export class SingleSessionHTTPServer {
       });
 
       // Extract instance context from headers if present (for multi-tenant support)
-      const instanceContext: InstanceContext | undefined = (() => {
+      const instanceContext: InstanceContext | undefined = await (async () => {
         // Use type-safe header extraction
         const headers = extractMultiTenantHeaders(req);
         const hasUrl = headers['x-n8n-url'];
@@ -1329,6 +1377,27 @@ export class SingleSessionHTTPServer {
             hasKey: !!hasKey
           });
           return undefined;
+        }
+
+        // SECURITY: Validate n8n API URL against SSRF attacks
+        // The x-n8n-url header comes from the client and could target internal services.
+        // Uses DNS resolution to prevent DNS rebinding and blocks private IPs/cloud metadata.
+        if (context.n8nApiUrl) {
+          try {
+            const ssrfCheck = await validateN8nApiUrl(context.n8nApiUrl);
+            if (!ssrfCheck.valid) {
+              logger.warn('SSRF protection: n8n API URL blocked', {
+                reason: ssrfCheck.reason,
+                urlDomain: new URL(context.n8nApiUrl).hostname
+              });
+              return undefined;
+            }
+          } catch (err) {
+            logger.warn('SSRF protection: failed to validate n8n API URL', {
+              error: err instanceof Error ? err.message : String(err)
+            });
+            return undefined;
+          }
         }
 
         return context;
@@ -1606,7 +1675,7 @@ export class SingleSessionHTTPServer {
         },
         context: {
           n8nApiUrl: context.n8nApiUrl,
-          n8nApiKey: context.n8nApiKey,
+          n8nApiKey: '[REDACTED]',
           instanceId: context.instanceId || sessionId, // Use sessionId as fallback
           sessionId: context.sessionId,
           metadata: context.metadata

@@ -1,37 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleUpdatePartialWorkflow = handleUpdatePartialWorkflow;
 const zod_1 = require("zod");
@@ -43,6 +10,20 @@ const n8n_validation_1 = require("../services/n8n-validation");
 const workflow_versioning_service_1 = require("../services/workflow-versioning-service");
 const workflow_validator_1 = require("../services/workflow-validator");
 const enhanced_config_validator_1 = require("../services/enhanced-config-validator");
+const DEFAULT_BLOCKED_NODE_TYPES = [
+    'n8n-nodes-base.executeCommand',
+    'n8n-nodes-base.code',
+    'n8n-nodes-base.ssh',
+    'n8n-nodes-base.function',
+    'n8n-nodes-base.functionItem',
+];
+function getBlockedNodeTypes() {
+    const envBlocklist = process.env.N8N_MCP_BLOCKED_NODE_TYPES;
+    if (envBlocklist === '')
+        return new Set();
+    const types = envBlocklist ? envBlocklist.split(',').map(t => t.trim()) : DEFAULT_BLOCKED_NODE_TYPES;
+    return new Set(types);
+}
 let cachedValidator = null;
 function getValidator(repository) {
     if (!cachedValidator) {
@@ -55,13 +36,13 @@ const NODE_TARGETING_OPERATIONS = new Set([
 ]);
 const workflowDiffSchema = zod_1.z.object({
     id: zod_1.z.string(),
-    operations: zod_1.z.array(zod_1.z.object({
+    operations: zod_1.z.preprocess(handlers_n8n_manager_1.tryParseJson, zod_1.z.array(zod_1.z.object({
         type: zod_1.z.string(),
         description: zod_1.z.string().optional(),
-        node: zod_1.z.any().optional(),
+        node: n8n_validation_1.workflowNodeSchema.optional(),
         nodeId: zod_1.z.string().optional(),
         nodeName: zod_1.z.string().optional(),
-        updates: zod_1.z.any().optional(),
+        updates: zod_1.z.record(zod_1.z.unknown()).optional(),
         position: zod_1.z.tuple([zod_1.z.number(), zod_1.z.number()]).optional(),
         source: zod_1.z.string().optional(),
         target: zod_1.z.string().optional(),
@@ -75,8 +56,8 @@ const workflowDiffSchema = zod_1.z.object({
         case: zod_1.z.number().optional(),
         ignoreErrors: zod_1.z.boolean().optional(),
         dryRun: zod_1.z.boolean().optional(),
-        connections: zod_1.z.any().optional(),
-        settings: zod_1.z.any().optional(),
+        connections: n8n_validation_1.workflowConnectionSchema.optional(),
+        settings: n8n_validation_1.workflowSettingsSchema.optional(),
         name: zod_1.z.string().optional(),
         tag: zod_1.z.string().optional(),
         destinationProjectId: zod_1.z.string().min(1).optional(),
@@ -93,7 +74,7 @@ const workflowDiffSchema = zod_1.z.object({
             }
         }
         return op;
-    })),
+    }))),
     validateOnly: zod_1.z.boolean().optional(),
     continueOnError: zod_1.z.boolean().optional(),
     createBackup: zod_1.z.boolean().optional(),
@@ -115,6 +96,20 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
             });
         }
         const input = workflowDiffSchema.parse(args);
+        const blocked = getBlockedNodeTypes();
+        if (blocked.size > 0) {
+            const addNodeOps = input.operations.filter((op) => op.type === 'addNode' && op.node?.type);
+            const violations = addNodeOps
+                .filter((op) => blocked.has(op.node.type))
+                .map((op) => `addNode operation uses blocked type "${op.node.type}". Override via N8N_MCP_BLOCKED_NODE_TYPES env var.`);
+            if (violations.length > 0) {
+                return {
+                    success: false,
+                    error: 'Partial update contains blocked node types',
+                    details: { violations }
+                };
+            }
+        }
         const client = (0, handlers_n8n_manager_1.getN8nApiClient)(context);
         if (!client) {
             return {
@@ -403,22 +398,6 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     };
                 }
             }
-            if (workflowBefore && !input.validateOnly) {
-                trackWorkflowMutation({
-                    sessionId,
-                    toolName: 'n8n_update_partial_workflow',
-                    userIntent: input.intent || 'Partial workflow update',
-                    operations: input.operations,
-                    workflowBefore,
-                    workflowAfter: finalWorkflow,
-                    validationBefore,
-                    validationAfter,
-                    mutationSuccess: true,
-                    durationMs: Date.now() - startTime,
-                }).catch(err => {
-                    logger_1.logger.debug('Failed to track mutation telemetry:', err);
-                });
-            }
             return {
                 success: true,
                 saved: true,
@@ -439,23 +418,6 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
             };
         }
         catch (error) {
-            if (workflowBefore && !input.validateOnly) {
-                trackWorkflowMutation({
-                    sessionId,
-                    toolName: 'n8n_update_partial_workflow',
-                    userIntent: input.intent || 'Partial workflow update',
-                    operations: input.operations,
-                    workflowBefore,
-                    workflowAfter: workflowBefore,
-                    validationBefore,
-                    validationAfter: validationBefore,
-                    mutationSuccess: false,
-                    mutationError: error instanceof Error ? error.message : 'Unknown error',
-                    durationMs: Date.now() - startTime,
-                }).catch(err => {
-                    logger_1.logger.warn('Failed to track mutation telemetry for failed operation:', err);
-                });
-            }
             if (error instanceof n8n_errors_1.N8nApiError) {
                 return {
                     success: false,
@@ -547,19 +509,5 @@ function inferIntentFromOperations(operations) {
     return summary.length > 0
         ? `Workflow update: ${summary.join(', ')}`
         : `Workflow update: ${opCount} operations`;
-}
-async function trackWorkflowMutation(data) {
-    try {
-        if (!data.userIntent ||
-            data.userIntent === 'Partial workflow update' ||
-            data.userIntent.length < 10) {
-            data.userIntent = inferIntentFromOperations(data.operations);
-        }
-        const { telemetry } = await Promise.resolve().then(() => __importStar(require('../telemetry/telemetry-manager.js')));
-        await telemetry.trackWorkflowMutation(data);
-    }
-    catch (error) {
-        logger_1.logger.debug('Telemetry tracking failed:', error);
-    }
 }
 //# sourceMappingURL=handlers-workflow-diff.js.map

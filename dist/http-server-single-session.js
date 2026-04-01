@@ -22,6 +22,7 @@ const crypto_1 = require("crypto");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const protocol_version_1 = require("./utils/protocol-version");
 const instance_context_1 = require("./types/instance-context");
+const n8n_api_1 = require("./config/n8n-api");
 const shared_database_1 = require("./database/shared-database");
 dotenv_1.default.config();
 const DEFAULT_PROTOCOL_VERSION = protocol_version_1.STANDARD_PROTOCOL_VERSION;
@@ -53,7 +54,7 @@ class SingleSessionHTTPServer {
         this.contextSwitchLocks = new Map();
         this.session = null;
         this.consoleManager = new console_manager_1.ConsoleManager();
-        this.sessionTimeout = parseInt(process.env.SESSION_TIMEOUT_MINUTES || '5', 10) * 60 * 1000;
+        this.sessionTimeout = parseInt(process.env.SESSION_TIMEOUT_MINUTES || '30', 10) * 60 * 1000;
         this.authToken = null;
         this.cleanupTimer = null;
         this.validateEnvironment();
@@ -536,9 +537,47 @@ class SingleSessionHTTPServer {
             return true;
         return Date.now() - metadata.lastAccess.getTime() > this.sessionTimeout;
     }
+    measureJsonDepth(value, current, cutoff) {
+        if (current >= cutoff)
+            return current;
+        if (value === null || typeof value !== 'object')
+            return current;
+        let maxChild = current;
+        const entries = Array.isArray(value) ? value : Object.values(value);
+        for (const child of entries) {
+            const childDepth = this.measureJsonDepth(child, current + 1, cutoff);
+            if (childDepth >= cutoff)
+                return childDepth;
+            if (childDepth > maxChild)
+                maxChild = childDepth;
+        }
+        return maxChild;
+    }
     async start() {
         const app = (0, express_1.default)();
         const jsonParser = express_1.default.json({ limit: '10mb' });
+        const MAX_JSON_DEPTH = 20;
+        const jsonDepthGuard = (req, res, next) => {
+            if (req.body) {
+                const depth = this.measureJsonDepth(req.body, 0, MAX_JSON_DEPTH + 1);
+                if (depth > MAX_JSON_DEPTH) {
+                    logger_1.logger.warn('Request rejected: JSON nesting depth exceeded limit', {
+                        maxDepth: MAX_JSON_DEPTH,
+                        ip: req.ip
+                    });
+                    res.status(400).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32600,
+                            message: `Request body nesting depth exceeds limit of ${MAX_JSON_DEPTH}`
+                        },
+                        id: req.body?.id || null
+                    });
+                    return;
+                }
+            }
+            next();
+        };
         const trustProxy = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
         if (trustProxy > 0) {
             app.set('trust proxy', trustProxy);
@@ -552,14 +591,16 @@ class SingleSessionHTTPServer {
             next();
         });
         app.use((req, res, next) => {
-            const allowedOrigin = process.env.CORS_ORIGIN || '*';
-            res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-            res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
-            res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
-            res.setHeader('Access-Control-Max-Age', '86400');
+            const corsOrigin = process.env.CORS_ORIGIN;
+            if (corsOrigin) {
+                res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+                res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
+                res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
+                res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+                res.setHeader('Access-Control-Max-Age', '86400');
+            }
             if (req.method === 'OPTIONS') {
-                res.sendStatus(204);
+                res.sendStatus(corsOrigin ? 204 : 403);
                 return;
             }
             next();
@@ -574,7 +615,7 @@ class SingleSessionHTTPServer {
         });
         app.get('/', (req, res) => {
             const port = parseInt(process.env.PORT || '3000');
-            const host = process.env.HOST || '0.0.0.0';
+            const host = process.env.HOST || '127.0.0.1';
             const baseUrl = (0, url_detector_1.detectBaseUrl)(req, host, port);
             const endpoints = (0, url_detector_1.formatEndpointUrls)(baseUrl);
             res.json({
@@ -637,7 +678,7 @@ class SingleSessionHTTPServer {
                 timestamp: new Date().toISOString()
             });
         });
-        app.post('/mcp/test', jsonParser, async (req, res) => {
+        app.post('/mcp/test', jsonParser, jsonDepthGuard, async (req, res) => {
             logger_1.logger.info('TEST ENDPOINT: Manual test request received', {
                 method: req.method,
                 headers: req.headers,
@@ -820,7 +861,7 @@ class SingleSessionHTTPServer {
                 });
             }
         });
-        app.post('/mcp', authLimiter, jsonParser, async (req, res) => {
+        app.post('/mcp', authLimiter, jsonParser, jsonDepthGuard, async (req, res) => {
             logger_1.logger.info('POST /mcp request received - DETAILED DEBUG', {
                 headers: req.headers,
                 readable: req.readable,
@@ -917,7 +958,7 @@ class SingleSessionHTTPServer {
                 sessionType: this.session?.isSSE ? 'SSE' : 'StreamableHTTP',
                 sessionInitialized: this.session?.initialized
             });
-            const instanceContext = (() => {
+            const instanceContext = await (async () => {
                 const headers = extractMultiTenantHeaders(req);
                 const hasUrl = headers['x-n8n-url'];
                 const hasKey = headers['x-n8n-key'];
@@ -943,6 +984,24 @@ class SingleSessionHTTPServer {
                         hasKey: !!hasKey
                     });
                     return undefined;
+                }
+                if (context.n8nApiUrl) {
+                    try {
+                        const ssrfCheck = await (0, n8n_api_1.validateN8nApiUrl)(context.n8nApiUrl);
+                        if (!ssrfCheck.valid) {
+                            logger_1.logger.warn('SSRF protection: n8n API URL blocked', {
+                                reason: ssrfCheck.reason,
+                                urlDomain: new URL(context.n8nApiUrl).hostname
+                            });
+                            return undefined;
+                        }
+                    }
+                    catch (err) {
+                        logger_1.logger.warn('SSRF protection: failed to validate n8n API URL', {
+                            error: err instanceof Error ? err.message : String(err)
+                        });
+                        return undefined;
+                    }
                 }
                 return context;
             })();
@@ -1136,7 +1195,7 @@ class SingleSessionHTTPServer {
                 },
                 context: {
                     n8nApiUrl: context.n8nApiUrl,
-                    n8nApiKey: context.n8nApiKey,
+                    n8nApiKey: '[REDACTED]',
                     instanceId: context.instanceId || sessionId,
                     sessionId: context.sessionId,
                     metadata: context.metadata

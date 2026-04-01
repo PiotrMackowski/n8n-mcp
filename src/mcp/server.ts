@@ -41,9 +41,7 @@ import {
   STANDARD_PROTOCOL_VERSION
 } from '../utils/protocol-version';
 import { InstanceContext } from '../types/instance-context';
-import { telemetry } from '../telemetry';
-import { EarlyErrorLogger } from '../telemetry/early-error-logger';
-import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
+
 
 interface NodeRow {
   node_type: string;
@@ -152,15 +150,13 @@ export class N8NDocumentationMCPServer {
   private instanceContext?: InstanceContext;
   private previousTool: string | null = null;
   private previousToolTimestamp: number = Date.now();
-  private earlyLogger: EarlyErrorLogger | null = null;
   private disabledToolsCache: Set<string> | null = null;
   private useSharedDatabase: boolean = false;  // Track if using shared DB for cleanup
   private sharedDbState: SharedDatabaseState | null = null;  // Reference to shared DB state for release
   private isShutdown: boolean = false;  // Prevent double-shutdown
 
-  constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger) {
+  constructor(instanceContext?: InstanceContext) {
     this.instanceContext = instanceContext;
-    this.earlyLogger = earlyLogger || null;
     // Check for test environment first
     const envDbPath = process.env.NODE_DB_PATH;
     let dbPath: string | null = null;
@@ -192,11 +188,7 @@ export class N8NDocumentationMCPServer {
     
     // Initialize database asynchronously
     this.initialized = this.initializeDatabase(dbPath).then(() => {
-      // After database is ready, check n8n API configuration (v2.18.3)
-      if (this.earlyLogger) {
-        this.earlyLogger.logCheckpoint(STARTUP_CHECKPOINTS.N8N_API_CHECKING);
-      }
-
+      // After database is ready, check n8n API configuration
       // Log n8n API configuration status at startup
       const apiConfigured = isN8nApiConfigured();
       const totalTools = apiConfigured ?
@@ -204,10 +196,6 @@ export class N8NDocumentationMCPServer {
         n8nDocumentationToolsFinal.length;
 
       logger.info(`MCP server initialized with ${totalTools} tools (n8n API: ${apiConfigured ? 'configured' : 'not configured'})`);
-
-      if (this.earlyLogger) {
-        this.earlyLogger.logCheckpoint(STARTUP_CHECKPOINTS.N8N_API_READY);
-      }
     });
 
     // Attach a no-op catch handler to prevent Node.js from flagging this as an
@@ -307,7 +295,6 @@ export class N8NDocumentationMCPServer {
       this.db = null;
       this.repository = null;
       this.templateService = null;
-      this.earlyLogger = null;
       this.sharedDbState = null;
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
@@ -317,11 +304,6 @@ export class N8NDocumentationMCPServer {
 
   private async initializeDatabase(dbPath: string): Promise<void> {
     try {
-      // Checkpoint: Database connecting (v2.18.3)
-      if (this.earlyLogger) {
-        this.earlyLogger.logCheckpoint(STARTUP_CHECKPOINTS.DATABASE_CONNECTING);
-      }
-
       logger.debug('Database initialization starting...', { dbPath });
 
       // For in-memory databases (tests), create a dedicated connection
@@ -351,11 +333,6 @@ export class N8NDocumentationMCPServer {
       logger.debug('Node repository initialized');
       logger.debug('Template service initialized');
       logger.debug('Similarity services initialized');
-
-      // Checkpoint: Database connected (v2.18.3)
-      if (this.earlyLogger) {
-        this.earlyLogger.logCheckpoint(STARTUP_CHECKPOINTS.DATABASE_CONNECTED);
-      }
 
       logger.info(`Database initialized successfully from: ${dbPath}`);
     } catch (error) {
@@ -548,9 +525,6 @@ export class N8NDocumentationMCPServer {
         clientInfo
       });
 
-      // Track session start
-      telemetry.trackSessionStart();
-
       // Store client info for later use
       this.clientInfo = clientInfo;
       
@@ -702,7 +676,7 @@ export class N8NDocumentationMCPServer {
           const parsed = JSON.parse(args as unknown as string);
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             processedArgs = parsed;
-            logger.warn(`Coerced stringified args object for tool "${name}"`);
+            logger.warn(`Coerced stringified args object for tool "${name}". Input was a JSON string instead of an object — this may indicate a client-side serialization issue.`);
           }
         } catch {
           logger.warn(`Tool "${name}" received string args that are not valid JSON`);
@@ -762,15 +736,6 @@ export class N8NDocumentationMCPServer {
         const duration = Date.now() - startTime;
         logger.debug(`Tool ${name} executed successfully`);
 
-        // Track tool usage and sequence
-        telemetry.trackToolUsage(name, true, duration);
-
-        // Track tool sequence if there was a previous tool
-        if (this.previousTool) {
-          const timeDelta = Date.now() - this.previousToolTimestamp;
-          telemetry.trackToolSequence(this.previousTool, name, timeDelta);
-        }
-
         // Update previous tool tracking
         this.previousTool = name;
         this.previousToolTimestamp = Date.now();
@@ -820,21 +785,6 @@ export class N8NDocumentationMCPServer {
       } catch (error) {
         logger.error(`Error executing tool ${name}`, error);
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-        // Track tool error
-        telemetry.trackToolUsage(name, false);
-        telemetry.trackError(
-          error instanceof Error ? error.constructor.name : 'UnknownError',
-          `tool_execution`,
-          name,
-          errorMessage
-        );
-
-        // Track tool sequence even for errors
-        if (this.previousTool) {
-          const timeDelta = Date.now() - this.previousToolTimestamp;
-          telemetry.trackToolSequence(this.previousTool, name, timeDelta);
-        }
 
         // Update previous tool tracking (even for failed tools)
         this.previousTool = name;
@@ -1265,10 +1215,12 @@ export class N8NDocumentationMCPServer {
     }
 
     if (coercedAny) {
-      logger.warn(`Coerced mistyped params for tool "${toolName}"`, {
-        original: Object.fromEntries(
-          Object.entries(args).map(([k, v]) => [k, `${typeof v}: ${typeof v === 'string' ? v.substring(0, 80) : v}`])
-        ),
+      const coercedKeys = Object.entries(args).filter(([k]) => {
+        return coerced[k] !== args[k];
+      }).map(([k]) => k);
+      logger.warn(`Coerced ${coercedKeys.length} mistyped param(s) for tool "${toolName}": [${coercedKeys.join(', ')}]`, {
+        coercedFields: coercedKeys,
+        toolName,
       });
     }
 
@@ -1743,11 +1695,21 @@ export class N8NDocumentationMCPServer {
     
     // Handle exact phrase searches with quotes
     if (cleanedQuery.startsWith('"') && cleanedQuery.endsWith('"')) {
-      // Keep exact phrase as is for FTS5
-      ftsQuery = cleanedQuery;
+      // Sanitize the inner content to prevent FTS5 operator injection
+      const inner = cleanedQuery.slice(1, -1);
+      const sanitizedInner = this.sanitizeFtsToken(inner);
+      ftsQuery = `"${sanitizedInner}"`;
     } else {
-      // Split into words and handle based on mode
-      const words = cleanedQuery.split(/\s+/).filter(w => w.length > 0);
+      // Split into words, sanitize each, and handle based on mode
+      const words = cleanedQuery.split(/\s+/)
+        .filter(w => w.length > 0)
+        .map(w => this.sanitizeFtsToken(w))
+        .filter(w => w.length > 0);
+
+      if (words.length === 0) {
+        // All tokens were stripped — fall back to LIKE search
+        return this.searchNodesLIKE(query, limit, options);
+      }
       
       switch (mode) {
         case 'AND':
@@ -1893,9 +1855,6 @@ export class N8NDocumentationMCPServer {
         }
       }
 
-      // Track search query telemetry
-      telemetry.trackSearchQuery(query, scoredNodes.length, mode ?? 'OR');
-
       return result;
       
     } catch (error: any) {
@@ -1909,9 +1868,6 @@ export class N8NDocumentationMCPServer {
         // For problematic queries, use LIKE search with mode info
         const likeResult = await this.searchNodesLIKE(query, limit);
 
-        // Track search query telemetry for fallback
-        telemetry.trackSearchQuery(query, likeResult.results?.length ?? 0, `${mode}_LIKE_FALLBACK`);
-
         return {
           ...likeResult,
           mode
@@ -1920,6 +1876,29 @@ export class N8NDocumentationMCPServer {
       
       return this.searchNodesLIKE(query, limit);
     }
+  }
+
+  /**
+   * Sanitize a single token for safe use in FTS5 MATCH queries.
+   * Strips FTS5 operators and special syntax characters that could
+   * alter query semantics (e.g., NEAR, NOT, column filters, prefix/initial tokens).
+   */
+  private sanitizeFtsToken(token: string): string {
+    // Remove FTS5 special characters: *, ^, ", :, (, ), {, }
+    // These have special meaning in FTS5 query syntax
+    let sanitized = token.replace(/[*^":(){}]/g, '');
+
+    // Remove leading + or - which are prefix operators in FTS5
+    sanitized = sanitized.replace(/^[+-]+/, '');
+
+    // If the remaining token is an FTS5 keyword, wrap it to be treated as literal
+    const ftsKeywords = new Set(['AND', 'OR', 'NOT', 'NEAR']);
+    if (ftsKeywords.has(sanitized.toUpperCase())) {
+      // Wrap in double quotes so FTS5 treats it as a literal term
+      sanitized = `"${sanitized}"`;
+    }
+
+    return sanitized.trim();
   }
   
   private async searchNodesFuzzy(query: string, limit: number): Promise<any> {
@@ -3965,27 +3944,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         response.suggestions = result.suggestions;
       }
 
-      // Track validation details in telemetry
-      if (!result.valid && result.errors.length > 0) {
-        // Track each validation error for analysis
-        result.errors.forEach(error => {
-          telemetry.trackValidationDetails(
-            error.nodeName || 'workflow',
-            error.type || 'validation_error',
-            {
-              message: error.message,
-              nodeCount: workflow.nodes?.length ?? 0,
-              hasConnections: Object.keys(workflow.connections || {}).length > 0
-            }
-          );
-        });
-      }
-
-      // Track successfully validated workflows in telemetry
-      if (result.valid) {
-        telemetry.trackWorkflowCreation(workflow, true);
-      }
-
       return response;
     } catch (error) {
       logger.error('Error validating workflow:', error);
@@ -4222,7 +4180,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     this.db = null;
     this.repository = null;
     this.templateService = null;
-    this.earlyLogger = null;
     this.sharedDbState = null;
   }
 }

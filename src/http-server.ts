@@ -198,7 +198,7 @@ export async function startFixedHTTPServer() {
   // Root endpoint with API information
   app.get('/', (req, res) => {
     const port = parseInt(process.env.PORT || '3000');
-    const host = process.env.HOST || '0.0.0.0';
+  const host = process.env.HOST || '127.0.0.1';
     const baseUrl = detectBaseUrl(req, host, port);
     const endpoints = formatEndpointUrls(baseUrl);
     
@@ -367,12 +367,29 @@ export async function startFixedHTTPServer() {
       
       // Collect the raw body
       let body = '';
+      const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB limit
+      let bodyTooLarge = false;
       req.on('data', chunk => {
         body += chunk.toString();
+        if (body.length > MAX_BODY_SIZE) {
+          bodyTooLarge = true;
+          req.destroy();
+        }
       });
       
       req.on('end', async () => {
         try {
+          if (bodyTooLarge) {
+            res.status(413).json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32600,
+                message: 'Request body too large'
+              },
+              id: null
+            });
+            return;
+          }
           const jsonRpcRequest = JSON.parse(body);
           logger.debug('Received JSON-RPC request:', { method: jsonRpcRequest.method });
           

@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EnhancedDocumentationFetcher = void 0;
 const fs_1 = require("fs");
+const os_1 = __importDefault(require("os"));
 const path_1 = __importDefault(require("path"));
 const logger_1 = require("./logger");
 const child_process_1 = require("child_process");
@@ -23,12 +24,20 @@ class EnhancedDocumentationFetcher {
                 throw new Error('Invalid docsPath: path contains disallowed characters or patterns');
             }
             const absolutePath = path_1.default.resolve(sanitized);
-            if (absolutePath.startsWith('/etc') ||
-                absolutePath.startsWith('/sys') ||
-                absolutePath.startsWith('/proc') ||
-                absolutePath.startsWith('/var/log')) {
-                logger_1.logger.error('docsPath points to system directory - blocked', { docsPath, absolutePath });
-                throw new Error('Invalid docsPath: cannot use system directories');
+            const allowedRoots = [
+                path_1.default.resolve(__dirname, '../../'),
+                path_1.default.resolve(process.cwd()),
+                path_1.default.join(os_1.default.homedir(), '.n8n'),
+                os_1.default.tmpdir(),
+            ];
+            const isAllowed = allowedRoots.some(root => absolutePath.startsWith(root + path_1.default.sep) || absolutePath === root);
+            if (!isAllowed) {
+                logger_1.logger.error('docsPath is outside allowed directories - blocked', {
+                    docsPath,
+                    absolutePath,
+                    allowedRoots
+                });
+                throw new Error('Invalid docsPath: path must be within the project, working directory, n8n config, or temp directory');
             }
             this.docsPath = absolutePath;
             logger_1.logger.info('docsPath validated and set', { docsPath: this.docsPath });

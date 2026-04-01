@@ -56,6 +56,7 @@ exports.handleDiagnostic = handleDiagnostic;
 exports.handleWorkflowVersions = handleWorkflowVersions;
 exports.handleDeployTemplate = handleDeployTemplate;
 exports.handleTriggerWebhookWorkflow = handleTriggerWebhookWorkflow;
+exports.tryParseJson = tryParseJson;
 exports.handleCreateTable = handleCreateTable;
 exports.handleListTables = handleListTables;
 exports.handleGetTable = handleGetTable;
@@ -80,10 +81,35 @@ const workflow_auto_fixer_1 = require("../services/workflow-auto-fixer");
 const expression_format_validator_1 = require("../services/expression-format-validator");
 const workflow_versioning_service_1 = require("../services/workflow-versioning-service");
 const handlers_workflow_diff_1 = require("./handlers-workflow-diff");
-const telemetry_1 = require("../telemetry");
 const cache_utils_1 = require("../utils/cache-utils");
 const execution_processor_1 = require("../services/execution-processor");
 const npm_version_checker_1 = require("../utils/npm-version-checker");
+const DEFAULT_BLOCKED_NODE_TYPES = [
+    'n8n-nodes-base.executeCommand',
+    'n8n-nodes-base.code',
+    'n8n-nodes-base.ssh',
+    'n8n-nodes-base.function',
+    'n8n-nodes-base.functionItem',
+];
+function getBlockedNodeTypes() {
+    const envBlocklist = process.env.N8N_MCP_BLOCKED_NODE_TYPES;
+    if (envBlocklist === '')
+        return new Set();
+    const types = envBlocklist ? envBlocklist.split(',').map(t => t.trim()) : DEFAULT_BLOCKED_NODE_TYPES;
+    return new Set(types);
+}
+function checkBlockedNodes(nodes) {
+    const blocked = getBlockedNodeTypes();
+    if (blocked.size === 0)
+        return [];
+    const violations = [];
+    for (const node of nodes) {
+        if (blocked.has(node.type)) {
+            violations.push(`Node "${node.name || node.type}" uses blocked type "${node.type}". Blocked types: ${[...blocked].join(', ')}. Override via N8N_MCP_BLOCKED_NODE_TYPES env var.`);
+        }
+    }
+    return violations;
+}
 let defaultApiClient = null;
 let lastDefaultConfigUrl = null;
 const cacheMutex = new cache_utils_1.CacheMutex();
@@ -173,26 +199,17 @@ function ensureApiConfigured(context) {
 }
 const createWorkflowSchema = zod_1.z.object({
     name: zod_1.z.string(),
-    nodes: zod_1.z.array(zod_1.z.any()),
-    connections: zod_1.z.record(zod_1.z.any()),
-    settings: zod_1.z.object({
-        executionOrder: zod_1.z.enum(['v0', 'v1']).optional(),
-        timezone: zod_1.z.string().optional(),
-        saveDataErrorExecution: zod_1.z.enum(['all', 'none']).optional(),
-        saveDataSuccessExecution: zod_1.z.enum(['all', 'none']).optional(),
-        saveManualExecutions: zod_1.z.boolean().optional(),
-        saveExecutionProgress: zod_1.z.boolean().optional(),
-        executionTimeout: zod_1.z.number().optional(),
-        errorWorkflow: zod_1.z.string().optional(),
-    }).optional(),
+    nodes: zod_1.z.array(n8n_validation_1.workflowNodeSchema),
+    connections: n8n_validation_1.workflowConnectionSchema,
+    settings: n8n_validation_1.workflowSettingsSchema.optional(),
     projectId: zod_1.z.string().optional(),
 });
 const updateWorkflowSchema = zod_1.z.object({
     id: zod_1.z.string(),
     name: zod_1.z.string().optional(),
-    nodes: zod_1.z.array(zod_1.z.any()).optional(),
-    connections: zod_1.z.record(zod_1.z.any()).optional(),
-    settings: zod_1.z.any().optional(),
+    nodes: zod_1.z.array(n8n_validation_1.workflowNodeSchema).optional(),
+    connections: n8n_validation_1.workflowConnectionSchema.optional(),
+    settings: n8n_validation_1.workflowSettingsSchema.optional(),
     createBackup: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
@@ -279,7 +296,6 @@ async function handleCreateWorkflow(args, context) {
             }
         });
         if (shortFormErrors.length > 0) {
-            telemetry_1.telemetry.trackWorkflowCreation(input, false);
             return {
                 success: false,
                 error: 'Node type format error: n8n API requires FULL form node types',
@@ -289,9 +305,16 @@ async function handleCreateWorkflow(args, context) {
                 }
             };
         }
+        const blockedViolations = checkBlockedNodes(input.nodes || []);
+        if (blockedViolations.length > 0) {
+            return {
+                success: false,
+                error: 'Workflow contains blocked node types',
+                details: { violations: blockedViolations }
+            };
+        }
         const errors = (0, n8n_validation_1.validateWorkflowStructure)(input);
         if (errors.length > 0) {
-            telemetry_1.telemetry.trackWorkflowCreation(input, false);
             return {
                 success: false,
                 error: 'Workflow validation failed',
@@ -308,7 +331,6 @@ async function handleCreateWorkflow(args, context) {
                 }
             };
         }
-        telemetry_1.telemetry.trackWorkflowCreation(workflow, true);
         return {
             success: true,
             data: {
@@ -515,6 +537,16 @@ async function handleUpdateWorkflow(args, repository, context) {
         const input = updateWorkflowSchema.parse(args);
         const { id, createBackup, intent, ...updateData } = input;
         userIntent = intent || 'Full workflow update';
+        if (updateData.nodes) {
+            const blockedViolations = checkBlockedNodes(updateData.nodes);
+            if (blockedViolations.length > 0) {
+                return {
+                    success: false,
+                    error: 'Workflow contains blocked node types',
+                    details: { violations: blockedViolations }
+                };
+            }
+        }
         if (updateData.nodes || updateData.connections) {
             const current = await client.getWorkflow(id);
             workflowBefore = JSON.parse(JSON.stringify(current));
@@ -552,20 +584,6 @@ async function handleUpdateWorkflow(args, repository, context) {
             }
         }
         const workflow = await client.updateWorkflow(id, updateData);
-        if (workflowBefore) {
-            trackWorkflowMutationForFullUpdate({
-                sessionId,
-                toolName: 'n8n_update_full_workflow',
-                userIntent,
-                operations: [],
-                workflowBefore,
-                workflowAfter: workflow,
-                mutationSuccess: true,
-                durationMs: Date.now() - startTime,
-            }).catch(err => {
-                logger_1.logger.warn('Failed to track mutation telemetry:', err);
-            });
-        }
         return {
             success: true,
             data: {
@@ -578,21 +596,6 @@ async function handleUpdateWorkflow(args, repository, context) {
         };
     }
     catch (error) {
-        if (workflowBefore) {
-            trackWorkflowMutationForFullUpdate({
-                sessionId,
-                toolName: 'n8n_update_full_workflow',
-                userIntent,
-                operations: [],
-                workflowBefore,
-                workflowAfter: workflowBefore,
-                mutationSuccess: false,
-                mutationError: error instanceof Error ? error.message : 'Unknown error',
-                durationMs: Date.now() - startTime,
-            }).catch(err => {
-                logger_1.logger.warn('Failed to track mutation telemetry for failed operation:', err);
-            });
-        }
         if (error instanceof zod_1.z.ZodError) {
             return {
                 success: false,
@@ -614,19 +617,16 @@ async function handleUpdateWorkflow(args, repository, context) {
         };
     }
 }
-async function trackWorkflowMutationForFullUpdate(data) {
-    try {
-        const { telemetry } = await Promise.resolve().then(() => __importStar(require('../telemetry/telemetry-manager.js')));
-        await telemetry.trackWorkflowMutation(data);
-    }
-    catch (error) {
-        logger_1.logger.debug('Telemetry tracking failed:', error);
-    }
-}
 async function handleDeleteWorkflow(args, context) {
     try {
         const client = ensureApiConfigured(context);
-        const { id } = zod_1.z.object({ id: zod_1.z.string() }).parse(args);
+        const { id, confirmDelete } = zod_1.z.object({ id: zod_1.z.string(), confirmDelete: zod_1.z.boolean().default(false) }).parse(args);
+        if (!confirmDelete) {
+            return {
+                success: false,
+                error: 'Destructive operation requires confirmation. Set confirmDelete: true to proceed.',
+            };
+        }
         const deleted = await client.deleteWorkflow(id);
         return {
             success: true,
@@ -762,9 +762,6 @@ async function handleValidateWorkflow(args, repository, context) {
         }
         if (validationResult.suggestions.length > 0) {
             response.suggestions = validationResult.suggestions;
-        }
-        if (validationResult.valid) {
-            telemetry_1.telemetry.trackWorkflowCreation(workflow, true);
         }
         return {
             success: true,
@@ -1171,7 +1168,13 @@ async function handleListExecutions(args, context) {
 async function handleDeleteExecution(args, context) {
     try {
         const client = ensureApiConfigured(context);
-        const { id } = zod_1.z.object({ id: zod_1.z.string() }).parse(args);
+        const { id, confirmDelete } = zod_1.z.object({ id: zod_1.z.string(), confirmDelete: zod_1.z.boolean().default(false) }).parse(args);
+        if (!confirmDelete) {
+            return {
+                success: false,
+                error: 'Destructive operation requires confirmation. Set confirmDelete: true to proceed.',
+            };
+        }
         await client.deleteExecution(id);
         return {
             success: true,
@@ -1242,12 +1245,6 @@ async function handleHealthCheck(context) {
         if (versionCheck.isOutdated && versionCheck.latestVersion) {
             responseData.updateWarning = `⚠️  n8n-mcp v${versionCheck.latestVersion} is available (you have v${versionCheck.currentVersion}). Update recommended.`;
         }
-        telemetry_1.telemetry.trackEvent('health_check_completed', {
-            success: true,
-            responseTimeMs: responseTime,
-            upToDate: !versionCheck.isOutdated,
-            apiConnected: true
-        });
         return {
             success: true,
             data: responseData
@@ -1255,11 +1252,6 @@ async function handleHealthCheck(context) {
     }
     catch (error) {
         const responseTime = Date.now() - startTime;
-        telemetry_1.telemetry.trackEvent('health_check_failed', {
-            success: false,
-            responseTimeMs: responseTime,
-            errorType: error instanceof n8n_errors_1.N8nApiError ? error.code : 'unknown'
-        });
         if (error instanceof n8n_errors_1.N8nApiError) {
             return {
                 success: false,
@@ -1651,22 +1643,16 @@ async function handleDiagnostic(request, context) {
     }
     if (verbose) {
         diagnostic.debug = {
-            processEnv: Object.keys(process.env).filter(key => key.startsWith('N8N_') || key.startsWith('MCP_')),
+            processEnvKeys: [
+                'N8N_API_URL', 'N8N_MCP_BLOCKED_NODE_TYPES', 'MCP_MODE',
+                'NODE_ENV', 'HOST', 'PORT', 'CORS_ORIGIN', 'DISABLED_TOOLS'
+            ].filter(key => key in process.env),
             nodeVersion: process.version,
             platform: process.platform,
             workingDirectory: process.cwd(),
             cacheMetrics: cacheMetricsData
         };
     }
-    telemetry_1.telemetry.trackEvent('diagnostic_completed', {
-        success: true,
-        apiConfigured,
-        apiConnected: apiStatus.connected,
-        toolsAvailable: totalTools,
-        responseTimeMs: responseTime,
-        upToDate: !versionCheck.isOutdated,
-        verbose
-    });
     return {
         success: true,
         data: diagnostic
@@ -1854,6 +1840,19 @@ async function handleDeployTemplate(args, templateService, repository, context) 
                 success: false,
                 error: 'Template has invalid workflow structure',
                 details: { templateId: input.templateId }
+            };
+        }
+        const blockedViolations = checkBlockedNodes(workflow.nodes);
+        if (blockedViolations.length > 0) {
+            return {
+                success: false,
+                error: 'Template contains blocked node types',
+                details: {
+                    templateId: input.templateId,
+                    templateName: template.name,
+                    violations: blockedViolations,
+                    hint: 'Override via N8N_MCP_BLOCKED_NODE_TYPES env var (empty string to disable)'
+                }
             };
         }
         const workflowName = input.name || template.name;
@@ -2192,7 +2191,13 @@ async function handleUpdateTable(args, context) {
 async function handleDeleteTable(args, context) {
     try {
         const client = ensureApiConfigured(context);
-        const { tableId } = tableIdSchema.parse(args);
+        const { tableId, confirmDelete } = zod_1.z.object({ tableId: zod_1.z.string(), confirmDelete: zod_1.z.boolean().default(false) }).parse(args);
+        if (!confirmDelete) {
+            return {
+                success: false,
+                error: 'Destructive operation requires confirmation. Set confirmDelete: true to proceed.',
+            };
+        }
         await client.deleteDataTable(tableId);
         return { success: true, message: `Data table ${tableId} deleted successfully` };
     }

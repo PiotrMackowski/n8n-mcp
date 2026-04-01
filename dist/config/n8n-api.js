@@ -6,8 +6,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getN8nApiConfig = getN8nApiConfig;
 exports.isN8nApiConfigured = isN8nApiConfigured;
 exports.getN8nApiConfigFromContext = getN8nApiConfigFromContext;
+exports.validateN8nApiUrl = validateN8nApiUrl;
 const zod_1 = require("zod");
 const dotenv_1 = __importDefault(require("dotenv"));
+const ssrf_protection_1 = require("../utils/ssrf-protection");
 const n8nApiConfigSchema = zod_1.z.object({
     N8N_API_URL: zod_1.z.string().url().optional(),
     N8N_API_KEY: zod_1.z.string().min(1).optional(),
@@ -49,5 +51,8 @@ function getN8nApiConfigFromContext(context) {
         timeout: context.n8nApiTimeout ?? 30000,
         maxRetries: context.n8nApiMaxRetries ?? 3,
     };
+}
+async function validateN8nApiUrl(url) {
+    return ssrf_protection_1.SSRFProtection.validateWebhookUrl(url);
 }
 //# sourceMappingURL=n8n-api.js.map

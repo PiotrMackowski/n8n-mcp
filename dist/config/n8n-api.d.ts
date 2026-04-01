@@ -11,5 +11,9 @@ export declare function getN8nApiConfigFromContext(context: {
     n8nApiTimeout?: number;
     n8nApiMaxRetries?: number;
 }): N8nApiConfig | null;
+export declare function validateN8nApiUrl(url: string): Promise<{
+    valid: boolean;
+    reason?: string;
+}>;
 export type N8nApiConfig = NonNullable<ReturnType<typeof getN8nApiConfig>>;
 //# sourceMappingURL=n8n-api.d.ts.map

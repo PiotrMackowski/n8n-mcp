@@ -144,7 +144,19 @@ class MCPNode {
                     case 'callTool':
                         const toolName = this.getNodeParameter('toolName', itemIndex);
                         const toolArgumentsJson = this.getNodeParameter('toolArguments', itemIndex);
-                        const toolArguments = JSON.parse(toolArgumentsJson);
+                        let toolArguments;
+                        try {
+                            const parsed = JSON.parse(toolArgumentsJson);
+                            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                                throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'Tool arguments must be a JSON object', { itemIndex });
+                            }
+                            toolArguments = parsed;
+                        }
+                        catch (e) {
+                            if (e instanceof n8n_workflow_1.NodeOperationError)
+                                throw e;
+                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Invalid JSON in toolArguments: ${e.message}`, { itemIndex });
+                        }
                         result = await this.callMCPTool(credentials, toolName, toolArguments);
                         break;
                     case 'listTools':
@@ -160,7 +172,19 @@ class MCPNode {
                     case 'getPrompt':
                         const promptName = this.getNodeParameter('promptName', itemIndex);
                         const promptArgumentsJson = this.getNodeParameter('promptArguments', itemIndex);
-                        const promptArguments = JSON.parse(promptArgumentsJson);
+                        let promptArguments;
+                        try {
+                            const parsed = JSON.parse(promptArgumentsJson);
+                            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                                throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'Prompt arguments must be a JSON object', { itemIndex });
+                            }
+                            promptArguments = parsed;
+                        }
+                        catch (e) {
+                            if (e instanceof n8n_workflow_1.NodeOperationError)
+                                throw e;
+                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Invalid JSON in promptArguments: ${e.message}`, { itemIndex });
+                        }
                         result = await this.getMCPPrompt(credentials, promptName, promptArguments);
                         break;
                     case 'listPrompts':
