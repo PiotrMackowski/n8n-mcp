@@ -216,10 +216,8 @@ describe('tools-documentation', () => {
         
         expect(overview).toContain('# n8n MCP Tools Reference');
         expect(overview).toContain('## Important: Compatibility Notice');
-        // The tools-documentation module dynamically reads version from package.json
-        // so we need to read it the same way to match
         const packageJson = require('../../../package.json');
-        const n8nVersion = packageJson.dependencies.n8n.replace(/[^0-9.]/g, '');
+        const n8nVersion = packageJson.dependencies?.n8n?.replace(/[^0-9.]/g, '') || 'latest';
         expect(overview).toContain(`n8n version ${n8nVersion}`);
         expect(overview).toContain('## Code Node Configuration');
         expect(overview).toContain('## Standard Workflow Pattern');

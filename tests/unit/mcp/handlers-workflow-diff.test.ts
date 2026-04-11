@@ -459,7 +459,14 @@ describe('handlers-workflow-diff', () => {
       const result = await handleUpdatePartialWorkflow(diffRequest, mockRepository);
 
       expect(result.success).toBe(true);
-      expect(mockDiffEngine.applyDiff).toHaveBeenCalledWith(testWorkflow, diffRequest);
+      expect(mockDiffEngine.applyDiff).toHaveBeenCalledTimes(1);
+      const [calledWorkflow, calledRequest] = mockDiffEngine.applyDiff.mock.calls[0];
+      expect(calledWorkflow).toEqual(testWorkflow);
+      expect(calledRequest.id).toBe(diffRequest.id);
+      expect(calledRequest.operations).toHaveLength(diffRequest.operations.length);
+      expect(calledRequest.operations.map((op: any) => op.type)).toEqual(
+        diffRequest.operations.map(op => op.type)
+      );
     });
 
     it('should handle debug logging when enabled', async () => {

@@ -12,6 +12,12 @@ import {
 } from '@/utils/n8n-errors';
 import { ExecutionStatus } from '@/types/n8n-api';
 
+const { zodAny } = vi.hoisted(() => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { z } = require('zod');
+  return { zodAny: z.any() };
+});
+
 // Mock dependencies
 vi.mock('@/services/n8n-api-client');
 vi.mock('@/services/workflow-validator');
@@ -23,6 +29,9 @@ vi.mock('@/services/n8n-validation', () => ({
   validateWorkflowStructure: vi.fn(),
   hasWebhookTrigger: vi.fn(),
   getWebhookUrl: vi.fn(),
+  workflowNodeSchema: zodAny,
+  workflowConnectionSchema: zodAny,
+  workflowSettingsSchema: zodAny,
 }));
 vi.mock('@/utils/logger', () => ({
   logger: {
@@ -764,7 +773,7 @@ describe('handlers-n8n-manager', () => {
       const testWorkflow = createTestWorkflow();
       mockApiClient.deleteWorkflow.mockResolvedValue(testWorkflow);
 
-      const result = await handlers.handleDeleteWorkflow({ id: 'test-workflow-id' });
+      const result = await handlers.handleDeleteWorkflow({ id: 'test-workflow-id', confirmDelete: true });
 
       expect(result).toEqual({
         success: true,
@@ -790,7 +799,7 @@ describe('handlers-n8n-manager', () => {
       const apiError = new N8nNotFoundError('Workflow', 'non-existent-id');
       mockApiClient.deleteWorkflow.mockRejectedValue(apiError);
 
-      const result = await handlers.handleDeleteWorkflow({ id: 'non-existent-id' });
+      const result = await handlers.handleDeleteWorkflow({ id: 'non-existent-id', confirmDelete: true });
 
       expect(result).toEqual({
         success: false,
@@ -803,7 +812,7 @@ describe('handlers-n8n-manager', () => {
       const genericError = new Error('Database connection failed');
       mockApiClient.deleteWorkflow.mockRejectedValue(genericError);
 
-      const result = await handlers.handleDeleteWorkflow({ id: 'test-workflow-id' });
+      const result = await handlers.handleDeleteWorkflow({ id: 'test-workflow-id', confirmDelete: true });
 
       expect(result).toEqual({
         success: false,

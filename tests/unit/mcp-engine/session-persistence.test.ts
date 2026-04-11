@@ -207,7 +207,7 @@ describe('N8NMCPEngine - Session Persistence', () => {
       expect(serverAny.sessionMetadata['engine-session']).toBeDefined();
       expect(serverAny.sessionContexts['engine-session']).toMatchObject({
         n8nApiUrl: 'https://engine-test.example.com',
-        n8nApiKey: 'engine-key',
+        n8nApiKey: '[REDACTED]',
         instanceId: 'engine-instance',
         metadata: { env: 'production' }
       });

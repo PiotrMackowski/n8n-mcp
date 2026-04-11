@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { N8nApiClient } from '@/services/n8n-api-client';
 import { N8nApiError } from '@/utils/n8n-errors';
 
+const { zodAny } = vi.hoisted(() => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { z } = require('zod');
+  return { zodAny: z.any() };
+});
+
 // Mock dependencies
 vi.mock('@/services/n8n-api-client');
 vi.mock('@/config/n8n-api', () => ({
@@ -11,6 +17,9 @@ vi.mock('@/services/n8n-validation', () => ({
   validateWorkflowStructure: vi.fn(),
   hasWebhookTrigger: vi.fn(),
   getWebhookUrl: vi.fn(),
+  workflowNodeSchema: zodAny,
+  workflowConnectionSchema: zodAny,
+  workflowSettingsSchema: zodAny,
 }));
 vi.mock('@/utils/logger', () => ({
   logger: {
@@ -388,7 +397,7 @@ describe('Data Table Handlers (n8n_manage_datatable)', () => {
     it('should delete table successfully', async () => {
       mockApiClient.deleteDataTable.mockResolvedValue(undefined);
 
-      const result = await handlers.handleDeleteTable({ tableId: 'dt-1' });
+      const result = await handlers.handleDeleteTable({ tableId: 'dt-1', confirmDelete: true });
 
       expect(result).toEqual({
         success: true,
@@ -401,7 +410,7 @@ describe('Data Table Handlers (n8n_manage_datatable)', () => {
       const notFoundError = new N8nApiError('Data table not found', 404, 'NOT_FOUND');
       mockApiClient.deleteDataTable.mockRejectedValue(notFoundError);
 
-      const result = await handlers.handleDeleteTable({ tableId: 'dt-nonexistent' });
+      const result = await handlers.handleDeleteTable({ tableId: 'dt-nonexistent', confirmDelete: true });
 
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();

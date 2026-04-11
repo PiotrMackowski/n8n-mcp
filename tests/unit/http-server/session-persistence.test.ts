@@ -72,7 +72,7 @@ describe('SingleSessionHTTPServer - Session Persistence', () => {
         },
         context: {
           n8nApiUrl: 'https://n8n1.example.com',
-          n8nApiKey: 'key1',
+          n8nApiKey: '[REDACTED]',
           instanceId: 'instance1',
           sessionId: sessionId1,
           metadata: { userId: 'user1' }
@@ -88,7 +88,7 @@ describe('SingleSessionHTTPServer - Session Persistence', () => {
         },
         context: {
           n8nApiUrl: 'https://n8n2.example.com',
-          n8nApiKey: 'key2',
+          n8nApiKey: '[REDACTED]',
           instanceId: 'instance2'
         }
       });
@@ -536,7 +536,7 @@ describe('SingleSessionHTTPServer - Session Persistence', () => {
 
       expect(context).toMatchObject({
         n8nApiUrl: 'https://n8n1.example.com',
-        n8nApiKey: 'key1',
+        n8nApiKey: '[REDACTED]',
         instanceId: 'instance1',
         sessionId: 'custom-id-1',
         metadata: { userId: 'user1', role: 'admin' }
