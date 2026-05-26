@@ -12,8 +12,3 @@ export { http, HttpResponse } from 'msw';
 
 // Export factory utilities
 export { n8nHandlerFactory } from '../../setup/msw-setup';
-export { 
-  n8nApiMock, 
-  testDataBuilders,
-  mswTestServer 
-} from '../../integration/setup/msw-test-server';
